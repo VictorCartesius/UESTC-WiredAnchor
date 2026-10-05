@@ -258,6 +258,21 @@ function Get-KeepAliveProcess {
         Where-Object { $_.CommandLine -match '-File\s+"?[^"]*KeepAlive\.ps1' }
 }
 
+# Daemon state from the newest log's last state tag (written by SrunKeepAlive.ps1). This reports
+# the last state CHANGE, not live process memory, so the caller labels it when the daemon is down.
+function Get-SrunLogDaemonState {
+    if (-not (Test-Path -LiteralPath $script:SrunLogDir)) { return $null }
+    $file = Get-ChildItem -LiteralPath $script:SrunLogDir -Filter '*.log' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $file) { return $null }
+    $lines = @(Get-Content -LiteralPath $file.FullName -Tail 200 -ErrorAction SilentlyContinue)
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $m = [regex]::Match($lines[$i], $script:SrunStateTagPattern)   # pattern shared via SrunConfig.ps1
+        if ($m.Success) { return $m.Groups[1].Value }
+    }
+    return $null
+}
+
 # ---- ACTIONS ----
 
 function Show-Status {
@@ -276,11 +291,16 @@ function Show-Status {
     $procText = 'not running'
     if ($proc.Count) { $procText = 'pid ' + (($proc | ForEach-Object { $_.ProcessId }) -join ', ') }
 
+    $stateText = Get-SrunLogDaemonState
+    if (-not $stateText) { $stateText = 'unknown' }
+    elseif (-not $proc.Count) { $stateText += ' (last logged)' }
+
     Write-Host ("{0,-12} {1}" -f 'credentials', $credText)
     Write-Host ("{0,-12} {1}" -f 'area', "$($cfg.Locate) ($($cfg.LocateSource))")
     Write-Host ("{0,-12} {1}" -f 'gateway', "$($cfg.Url)  ac_id=$($cfg.AcId)  $($cfg.Domain)")
     Write-Host ("{0,-12} {1}" -f 'autostart', (Get-AutostartSummary))
     Write-Host ("{0,-12} {1}" -f 'daemon', $procText)
+    Write-Host ("{0,-12} {1}" -f 'state', $stateText)
     Write-Host ("{0,-12} {1}" -f 'logs', $script:SrunLogDir)
     if ($proc.Count) { Write-SrunRestartHint }
 }

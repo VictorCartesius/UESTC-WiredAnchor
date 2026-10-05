@@ -5,7 +5,7 @@ By Victor Cartesius
 
 | 项目 | 状态 |
 |---|---|
-| 版本号 | **1.0.0** |
+| 版本号 | **1.1.0** |
 | 运行环境 | Windows 10 / 11 + **Windows PowerShell 5.1**（系统自带，无第三方依赖） |
 | 网络与权限 | 需能访问认证网关；日常**无需管理员**（仅计划任务自启需要） |
 | 代码位置 | `main\`（入口 `main\Manage.ps1`） |
@@ -92,13 +92,13 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1
 
 ```
 main\
-├── Manage.ps1        ← 【推荐入口】统一管理界面（配置 / 自启 / 启停 / 日志）
+├── Manage.ps1        ← 【推荐入口】统一管理界面（配置 / 自启 / 启停 / 状态 / 日志）
 ├── Login.ps1         ← 入口：登录一次
 ├── KeepAlive.ps1     ← 入口：常驻 Keep-Alive
-├── SrunConfig.ps1    ← 配置权威：区域预设、网关、运营商、日志目录、环境变量名
-├── SrunLogin.ps1     ← 登录流程（get_challenge → 加密 → 提交认证）
+├── SrunConfig.ps1    ← 配置权威：区域预设、网关、运营商、日志目录、环境变量名、守护状态标记
+├── SrunLogin.ps1     ← 登录流程（网关身份校验 → get_challenge → 加密 → 提交认证）
 ├── SrunCrypto.ps1    ← 加密算法库（XXTEA / 自定义字母表 Base64 / MD5 / SHA1，纯计算）
-├── SrunKeepAlive.ps1 ← Keep-Alive 逻辑（探测、判定、退避重连）与 Keep-Alive 参数表
+├── SrunKeepAlive.ps1 ← Keep-Alive 逻辑（探测、身份门禁、判定、冷却、退避重连）与参数表
 ├── Start-Hidden.vbs  ← 无窗口启动器（自启与 `Start` 均经由它启动 Keep-Alive）
 └── logs\             ← 运行日志（按天生成 YYYY-MM-DD.log）
 ```
@@ -356,7 +356,7 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 | 日志目录 | `SrunConfig.ps1` 的 `$script:SrunLogDir`（写日志与读日志共用同一处） | `main\logs` |
 | 环境变量名（账号 / 密码 / 区域） | `SrunConfig.ps1` 的 `$script:SrunEnvNumber` / `$script:SrunEnvPasswd` / `$script:SrunEnvLocate` | `UESTC_NUMBER` / `UESTC_PASSWD` / `UESTC_LOCATE` |
 | 探测用哪个网址 / 期望内容 | `SrunKeepAlive.ps1` 的 `$script:SrunProbe`（网址与期望内容**成对**） | `http://www.msftconnecttest.com/connecttest.txt` / `Microsoft Connect Test` |
-| 探测频率、掉线阈值、重试间隔、超时 | `SrunKeepAlive.ps1` 顶部 `$script:SrunKeepAliveConfig` 表 | 见下表 |
+| 探测频率、掉线阈值、重试间隔、重连上限与冷却、超时 | `SrunKeepAlive.ps1` 顶部 `$script:SrunKeepAliveConfig` 表 | 见下表 |
 | 账号 / 密码 | 用户环境变量 `UESTC_NUMBER` / `UESTC_PASSWD` | — |
 
 > 新增区域时，只需在 `$script:SrunPresets` 中增加一行：菜单、`Status`、`SetLocate` 的合法取值及区域名列表均自动随之更新，它们均由该表派生，不存在其他硬编码。
@@ -378,7 +378,9 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 | `BackoffStart` | 4 | 重连失败后的初始退避（秒） |
 | `BackoffFactor` | 2 | 退避倍数 |
 | `MaxBackoff` | 60 | 退避上限（秒） |
-| `ConnectTimeoutMs` | 3000 | 网关可达性探测超时（毫秒） |
+| `MaxReconnectAttempts` | 5 | 连续重连失败达此次数后进入冷却 |
+| `CooldownDelay` | 600 | 冷却期的复核间隔（秒）；冷却期间不发起登录 |
+| `ConnectTimeoutMs` | 3000 | 网关可达性探测超时（毫秒）；该值的唯一来源在协议层 `SrunLogin.ps1`，此处引用 |
 | `ProbeTimeoutMs` | 5000 | 外网探测连接/读取超时（毫秒） |
 | `MaxProbeChars` | 65536 | 探测响应最多读取的字符数（防止伪造响应或门户页面导致内存占用失控） |
 | `LogRetentionDays` | 30 | 日志保留天数（守护进程启动时清理更早的日志；`0` 表示永久保留） |
@@ -405,12 +407,17 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Logs -LogLine
 典型日志：
 
 ```
-[2026-10-04 22:09:00] keep-alive started: gateway http://10.253.0.237, probe=http://www.msftconnecttest.com/connecttest.txt
-[2026-10-04 22:09:00] settings: loginTimeout=10s, OnlineInterval=30, ...
-[2026-10-04 22:09:01] online via 211.83.104.243
-[2026-10-04 22:15:12] offline: 3 consecutive failures on 211.83.104.243 - reconnecting
+[2026-10-04 22:09:00] keep-alive started: gateway http://10.253.0.237, probe http://www.msftconnecttest.com/connecttest.txt
+[2026-10-04 22:09:00] settings: loginTimeout=10s, ...
+[2026-10-04 22:09:01] online via 211.83.104.243 [state=Online]
+[2026-10-04 22:15:12] offline: 3 consecutive failures on 211.83.104.243 - reconnecting [state=Offline]
 [2026-10-04 22:15:13] reconnect: ok (ip 211.83.104.243)
+[2026-10-04 22:16:00] foreign gateway: identity check failed (client_ip 10.0.0.1 does not match local source 192.168.1.20) - not logging in [state=Foreign]
+[2026-10-04 22:26:00] reconnect failed x5 - cooling for 600s [state=Cooling]
+[2026-10-04 22:36:00] gateway identity confirmed again on wired outlet - resuming attempts [state=Offline]
 ```
+
+> 状态变化行尾部的 `[state=<状态>]` 是**机器可读标记**，`Manage.ps1 -Action Status` 的 `state` 一行即由它解析得到。
 
 ---
 
@@ -423,11 +430,18 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Logs -LogLine
 ```mermaid
 stateDiagram-v2
     [*] --> Online
-    Online --> Offline: 外网连续失败 N 次
+    Online --> Offline: 外网连续失败 N 次，且网关身份校验通过
+    Online --> Foreign: 身份校验失败（非校园网 / 门户）
     Online --> Detached: 网关不可达
     Online --> Idle: 出口不是有线网卡
     Offline --> Online: 重连成功且外网可达
+    Offline --> Cooling: 连续重连失败达上限
     Offline --> Detached: 网关也不可达
+    Offline --> Foreign: 身份校验失败
+    Cooling --> Offline: 到期且有线接口身份复核通过
+    Cooling --> Foreign: 身份校验失败
+    Foreign --> Online: 复核通过且外网可达
+    Foreign --> Detached: 网关不可达
     Detached --> Online: 网关恢复且外网可达
     Idle --> Online: 出口变回有线
 ```
@@ -435,9 +449,14 @@ stateDiagram-v2
 | 状态 | 判据 | 行为 |
 |---|---|---|
 | **Online** | 外网可达 | 静默等待，低频探测 |
-| **Offline** | 网关可达、外网不通 | 判定掉线 → 重连（失败则指数退避） |
+| **Offline** | 网关身份通过、外网不通 | 判定掉线 → 重连（失败则指数退避） |
+| **Foreign** | 网关地址可连，但身份校验失败 | 判定非校园网 / 门户，只复核，**永不登录** |
+| **Cooling** | 身份通过但连续重连失败达上限 | 冷却期内**不登录**，仅周期复核身份 |
 | **Detached** | 网关不可达 | 只等待，**不重连**（离网或未接入网线） |
 | **Idle** | 出口不是有线网卡 | 主动让出，**不介入**（例如使用 Wi-Fi） |
+
+> 每条状态变化日志行尾部带有机器可读标记 `[state=<状态>]`；`Manage.ps1 -Action Status` 的 `state` 一行据此显示守护进程当前状态。
+> 上图为关键迁移的**简化图**：任一状态在检测到网关不可达、或出口非有线时，都会分别转入 `Detached` / `Idle`（详见 `SrunKeepAlive.ps1` 主循环）。
 
 <a id="s9-2"></a>
 ### 9.2 只负责有线网络
@@ -448,6 +467,8 @@ stateDiagram-v2
 ### 9.3 登录协议
 
 认证流程与官方网页的 JavaScript 实现等价：获取本机 IP → 获取 challenge → 本地加密（XXTEA + 自定义字母表 Base64 + HMAC-MD5 + SHA1）→ 提交认证。因此**无需浏览器**。
+
+登录前先**校验对端身份**：仅当 `get_challenge` 回显的 `client_ip` 与本机有线出口源 IP 一致、且 `challenge` 形态合法时，才会构造并发送任何密码材料；否则进入 `Foreign` 状态，不发送凭据。
 
 ---
 
@@ -462,7 +483,9 @@ stateDiagram-v2
 | `unknown area 'xxx' (expected: ...)` | `UESTC_LOCATE`（或 `-Locate`）指定了预设表中不存在的区域名 | 改用 `SrunConfig.ps1` 的 `$script:SrunPresets` 中的键；报错信息会列出全部合法取值 |
 | `credentials are not set (...)` | 当前会话中未设置相应的环境变量 | 重新打开终端；或使用 `Manage.ps1` 的 `SetCredential` |
 | 环境变量已设置却读取不到 | 终端会话早于环境变量的设置 | 重新打开终端（`Manage.ps1` 亦会同步当前会话） |
-| 登录结果 `sign_error` | 网关响应格式变化或解析异常 | 当前版本会抛出 `get_challenge returned no client_ip ...` 等明确错误，按其提示排查 |
+| 登录结果 `sign_error` | 网关响应格式变化或解析异常 | 身份校验或解析失败会抛出 `gateway identity check failed: ...` 等明确错误，按其提示排查 |
+| 日志出现 `foreign gateway: identity check failed ...`，或 `Status` 的 `state` 为 `Foreign` | 网关地址可连，但对端不是 UESTC srun 网关（非校园网 / 强制门户 / 地址段撞车） | 属**有意的保护**：工具不会向对端发送任何密码材料。请确认接入的是 UESTC 有线网 |
+| `Status` 的 `state` 为 `Cooling` | 身份通过，但连续重连失败达上限（默认 5 次） | 冷却期内不登录；到期且在有线接口上身份复核通过后自动恢复。可先排查网关是否故障 |
 | `Install` 报 `Access is denied` | 计划任务需要管理员权限 | 改用 `-Method Run`，或使用 `Auto`（会自动回退） |
 | `Install` 提示 `Windows Script Host is unavailable` | 系统通过组策略禁用了 Windows Script Host，无窗口启动器不可用 | 功能仍可正常使用，但登录时窗口可能闪现；若需完全无窗口，改用 `-Method Task` 并由管理员设为"不管用户是否登录都运行" |
 | 确认 Keep-Alive 是否在运行 | 无窗口启动后无法直接观察进程 | 执行 `Manage.ps1 -Action Status` 查看 `daemon` 一行，或 `-Action Logs` 查看日志尾部 |
@@ -496,6 +519,9 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 - 不再需要时，可用 `Manage.ps1 -Action ClearCredential` 一次性清除两处（注册表与当前会话）；
   也可仅清除当前会话的副本：`Remove-Item Env:UESTC_PASSWD`。在共用计算机上请勿长期保存密码。
 - 自启方式 `Run` / `Task` 仅写入指向 `KeepAlive.ps1` 的启动命令，不含任何凭据。
+- **登录前先验明网关身份**：只有在 `get_challenge` 回显的 `client_ip` 与本机有线出口源 IP 一致、且 `challenge` 形态合法时，才会构造并发送密码材料。若对端不是真正的 srun 网关（非校园网 / 门户劫持 / 地址段撞车），工具进入 `Foreign` 状态并**不发送任何凭据**。
+  - 它的边界：能挡住"随手撞车 / 门户"一类廉价情形，但**挡不住定向恶意对端**——真正占据网关地址的设备可在 TCP 层看到本机源 IP 并原样回显，从而通过校验（此时它会拿到密码材料）；也挡不住位于到网关同一路径上的中间人（见下条）。
+  - 另注：身份探测（`get_challenge`）会携带**账号名**；密码受 `challenge` 加密保护，账号名不受。
 - **认证链路为明文 HTTP**（本节最重要的一项）：srun 网关本身仅提供 HTTP，而用于保护密码的 `challenge` 令牌**在同一条明文信道上下发**（XXTEA 的密钥即为该令牌）。因此，同一局域网内的监听者可解出明文密码，低熵密码还可能遭受离线字典攻击。
   - 此属**协议固有限制**，客户端无法单方面消除。本工具可做的是**仅管理有线网络**，不将认证流量发往无线侧。
   - 因此，请**仅在可信的校园有线网络中使用**，不要在公共 Wi-Fi 或不可信网络下依赖本工具。
@@ -521,6 +547,9 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 | 内存占用 | 常驻进程约 **90 MB**，随负载浮动（PowerShell 运行时开销）。该数值来自短时观测（单点实测 93.1 MB），尚无持续 24 小时以上的实测数据支撑 |
 | 移动安装目录后需重装自启 | 自启项记录的是绝对路径。`Start-Hidden.vbs` 自身可随目录移动，但自启项不会自动跟随；移动 `main` 后请重新执行 `Install` |
 | 认证链路为明文 HTTP | 见 §11；属协议固有限制，客户端无法消除 |
+| 网关响应未设读取上限 | 身份探测与登录响应经 `Invoke-WebRequest` 读取，未做有界读取（§7 的 `MaxProbeChars` 仅覆盖外网探测）。恶意对端可能返回超大响应，属已知残余风险 |
+| 无法完全区分"门户劫持"与"校园网掉线" | 主要防线是登录前的身份校验（`Foreign` 状态）；未引入 HTTPS / 证书或门户特征探针。若对端能回显本机源 IP，身份校验可被通过（见 §11） |
+| 身份校验依赖网关回显 `client_ip` | 校验要求网关返回的 `client_ip` 等于本机有线出口源 IP。若校方网关不满足该条件，会被判为 `Foreign` 而不登录（属保护性误判）；届时请按 §14.4 反馈 |
 | 日志默认保留 30 天 | 见 §7 的 `LogRetentionDays`（`0` 表示永久保留，磁盘占用不再有上限） |
 | 计划任务的"失败重启"当前不触发 | 任务中虽配置了失败重启 3 次，但无窗口启动器（`Start-Hidden.vbs`）启动后**不等子进程退出即返回**，任务因此总被记为"成功"，重启策略不会触发。启动失败的原因不会丢失，记录于日志的 `fatal:` 行（见 §10） |
 | **计划任务自启路径未经实机验证** | 本机全部验证均采用 `Run` 方式；以管理员身份安装（`-Method Task`，亦为 `Auto` 的首选）时走计划任务，其行为**仅有静态依据**，未在实机运行验证。建议先以 `-Method Run` 验证，或在安装后通过 `-Action Logs` 确认日志出现 `keep-alive started` |
@@ -544,16 +573,16 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 
 | 内容 | 唯一权威 |
 |---|---|
-| 区域预设 / 默认区域 / 运营商 / 日志目录 / 环境变量名 | `SrunConfig.ps1` |
-| Keep-Alive 参数 / 探测目标 / 有线网卡过滤 | `SrunKeepAlive.ps1` |
-| 登录请求头 / 登录请求超时 | `SrunLogin.ps1` |
+| 区域预设 / 默认区域 / 运营商 / 日志目录 / 环境变量名 / 守护状态标记 | `SrunConfig.ps1` |
+| Keep-Alive 参数（含冷却）/ 探测目标 / 有线网卡过滤 | `SrunKeepAlive.ps1` |
+| 登录请求头 / 登录请求超时 / 网关身份不变量 / 网关连接超时 | `SrunLogin.ps1` |
 | 动作清单（菜单条目与编号、命令行分发都从这里派生） | `Manage.ps1` 的 `$script:SrunActions` 表（`-Action` 的 `ValidateSet` 是它的镜像，启动时校验漂移） |
 | 自启项名称（计划任务名与注册表值名同源） | `Manage.ps1` 的 `$script:AutostartName` |
 | 启动器可执行文件路径 | `Manage.ps1` 的 `$script:WscriptExe` / `$script:PowerShellExe`（**注意**：`Start-Hidden.vbs` 内另有一份等价路径；因跨语言无法共享，**修改一处必须同步另一处**） |
 
 判断登录是否成功，统一依据协议层返回的 `$res.Success`，**不要在调用处比较返回字符串**。
 
-新增或修改脚本时，请保持**纯 ASCII 编码**（英文注释与文本），以避免编码引起的解析问题。
+**编码约束**：`main\` 下的**代码文件**（`.ps1` / `.vbs`）必须保持**字节级纯 ASCII**——既不包含非 ASCII 字符，也不包含 UTF-8 BOM（BOM 的字节 `EF BB BF` 会使文件在字节级不再是纯 ASCII）；**Markdown 文档**（`*.md`）**允许**带 UTF-8 BOM。此约束用于避免在不同语言 / 区域设置的计算机上出现编码解析问题。
 
 ---
 
@@ -565,6 +594,7 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 
 | 版本 | 日期 | 内容摘要 |
 |---|---|---|
+| **1.1.0** | 2026-10-05 | **加固版**。登录前增加**网关身份校验**（`client_ip` 回显须等于本机有线出口源 IP、`challenge` 形态校验），未通过则不构造、不发送任何密码材料；新增 `Foreign`（非校园网 / 门户，永不登录）与 `Cooling`（重连失败达上限后冷却）状态，及配置键 `MaxReconnectAttempts` / `CooldownDelay`；状态变化日志行新增 `[state=...]` 标记，`Status` 显示守护进程当前状态；并统一 `main\` 代码文件为**字节级纯 ASCII**（去除既有 BOM）。不破坏 §14.2 契约。 |
 | **1.0.0** | 2026-10-05 | **首次发布版**。自动登录 + Keep-Alive 重连 + 自启管理（Run / Task）+ 凭据 / 区域 / 日志管理；**无窗口**启动；启动期致命错误写入 `fatal:` 日志并以非 0 退出（不再静默退出）；探测响应**有界读取**与日志保留策略；动作 / 区域 / 键名 / 路径**单一来源**并有启动期漂移检查。 |
 
 <a id="s14-2"></a>
@@ -578,7 +608,7 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status
 | 环境变量名 | `UESTC_NUMBER` / `UESTC_PASSWD` / `UESTC_LOCATE` | 用户已保存的凭据将无法读取，必须重新设置 |
 | 配置键名与取值 | `$script:SrunKeepAliveConfig` 的键名；区域名 `Teaching` / `Dorm`；运营商后缀 `$script:SrunDomain` | 用户按 §7 完成的配置失效；`UESTC_LOCATE` 的旧值会被拒绝 |
 | 自启项标识 | `UESTC-WiredAnchor`（计划任务名与 Run 值名同源） | `Uninstall` / `Disable` 将无法定位自身条目，在用户计算机上残留无法清理的项 |
-| 日志位置与格式 | `main\logs\YYYY-MM-DD.log`；行前缀 `[yyyy-MM-dd HH:mm:ss] `；仅记录状态变化 | 任何依据日志判断的脚本或习惯失效 |
+| 日志位置与格式 | `main\logs\YYYY-MM-DD.log`；行前缀 `[yyyy-MM-dd HH:mm:ss] `；仅记录状态变化；状态变化行尾部附带机器可读标记 `[state=<状态>]`（1.1.0 起新增，属**追加**，不改行前缀） | 任何依据日志判断的脚本或习惯失效 |
 | 入口输出 | `Login.ps1` 打印 `ip …` 与 `connected`；成功退出码 0、失败 1 | 用户的判断条件失效 |
 | 运行环境 | Windows + Windows PowerShell 5.1；**无第三方依赖**；目录布局固定 | 引入模块依赖将导致用户无法安装 |
 | 协议不变量（红线） | `acid` / `ac_id` 的拼写、校验和拼接顺序、`[Math]::Floor`、`4294967295` 掩码 | 登录将直接失败（属正确性要求，但同样必须单独列出） |

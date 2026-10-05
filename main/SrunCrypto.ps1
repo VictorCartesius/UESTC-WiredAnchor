@@ -1,4 +1,4 @@
-﻿# SrunCrypto.ps1 : For Srun authentication encryption.
+# SrunCrypto.ps1 : For Srun authentication encryption.
 
 function To-Hex([byte[]]$b) { ($b | ForEach-Object { $_.ToString('x2') }) -join '' }
 

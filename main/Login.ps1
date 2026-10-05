@@ -1,4 +1,4 @@
-﻿# Srun Authentication through PowerShell.
+# Srun Authentication through PowerShell.
 # Prints the source IP, then one result line ('connected', or 'login failed: <reason>').
 # Exits 0 on success and 1 on failure.
 

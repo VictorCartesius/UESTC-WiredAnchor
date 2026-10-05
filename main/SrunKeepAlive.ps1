@@ -6,18 +6,20 @@
 
 # ---- SETTINGS ----
 $script:SrunKeepAliveConfig = [ordered]@{
-    OnlineInterval   = 30     # probe interval while online (seconds)
-    FailThreshold    = 3      # consecutive internet failures before treating as offline
-    DetachedDelay    = 60     # recheck interval when detached / not on a wired outlet (seconds)
-    RetestDelay      = 3      # wait before re-probing while failures are below the threshold
-    PostLoginDelay   = 2      # wait after a successful reconnect before re-probing
-    BackoffStart     = 4      # initial backoff after a failed reconnect (seconds)
-    BackoffFactor    = 2      # backoff multiplier applied per failed reconnect attempt
-    MaxBackoff       = 60     # maximum backoff between failed reconnect attempts (seconds)
-    ConnectTimeoutMs = 3000   # gateway reachability TCP connect timeout (ms)
-    ProbeTimeoutMs   = 5000   # internet probe connect / read timeout (ms)
-    MaxProbeChars    = 65536  # hard cap on probe response size (chars): a forged/portal answer cannot balloon memory
-    LogRetentionDays = 30     # delete log files older than this at daemon start (0 = keep forever)
+    OnlineInterval       = 30    # probe interval while online (seconds)
+    FailThreshold        = 3     # consecutive internet failures before treating as offline
+    DetachedDelay        = 60    # recheck interval when detached / not on a wired outlet (seconds)
+    RetestDelay          = 3     # wait before re-probing while failures are below the threshold
+    PostLoginDelay       = 2     # wait after a successful reconnect before re-probing
+    BackoffStart         = 4     # initial backoff after a failed reconnect (seconds)
+    BackoffFactor        = 2     # backoff multiplier applied per failed reconnect attempt
+    MaxBackoff           = 60    # maximum backoff between failed reconnect attempts (seconds)
+    MaxReconnectAttempts = 5     # consecutive failed reconnects before cooling down
+    CooldownDelay        = 600   # cooldown recheck interval (seconds): never logs in during cooldown
+    ConnectTimeoutMs     = $script:SrunGatewayConnectTimeoutMs  # gateway TCP connect timeout (ms); value defined in SrunLogin.ps1
+    ProbeTimeoutMs       = 5000  # internet probe connect / read timeout (ms)
+    MaxProbeChars        = 65536 # hard cap on probe response size (chars): a forged/portal answer cannot balloon memory
+    LogRetentionDays     = 30    # delete log files older than this at daemon start (0 = keep forever)
 }
 
 # Probe target: URL and expected body belong together. An empty Expect means a status-only
@@ -54,6 +56,12 @@ function Write-SrunLog([string]$Message) {
     } catch { }
 }
 
+# A state-change line, tagged so Manage.ps1 -Action Status can report the current state. Both
+# the tag format and the parsing pattern come from a single definition in SrunConfig.ps1.
+function Write-SrunStateLog([string]$State, [string]$Message) {
+    Write-SrunLog "$Message $($script:SrunStateTag -f $State)"
+}
+
 # Prune logs older than $Days (0 = keep forever). Startup only, not on the logging hot path.
 # Returns the number of files removed.
 function Remove-SrunOldLogs([int]$Days) {
@@ -80,26 +88,6 @@ function Get-SrunWiredIpv4 {
                 $_.Address.IPAddressToString
             }
         }
-    }
-}
-
-# Connect to the gateway and return the local source IP used; $null if unreachable.
-# Host and port come from the URL (no hard-coded port).
-function Get-SrunGatewaySourceIp([string]$Url, [int]$TimeoutMs = $script:SrunKeepAliveConfig.ConnectTimeoutMs) {
-    $u   = [Uri]$Url
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    $iar = $null
-    try {
-        $iar = $tcp.BeginConnect($u.Host, $u.Port, $null, $null)
-        if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $null }
-        $tcp.EndConnect($iar)
-        return $tcp.Client.LocalEndPoint.Address.ToString()
-    } catch { return $null }
-    finally {
-        # Close() does not release the AsyncWaitHandle; without this every probe leaks a
-        # kernel wait handle until the finalizer runs.
-        if ($iar) { $iar.AsyncWaitHandle.Close() }
-        $tcp.Close()
     }
 }
 
@@ -163,30 +151,31 @@ function Start-SrunKeepAlive {
 
     $state = ''
     $fail = 0
+    $reconnectFailures = 0
     $backoff = 0
 
     while ($true) {
         # Long-running daemon: one unexpected error must not terminate it.
         try {
             # 1) Is the gateway reachable, and which source IP does the OS use?
-            $src = Get-SrunGatewaySourceIp $cfg.Url
+            $src = Get-SrunGatewaySourceIp $cfg.Url $S.ConnectTimeoutMs
             if (-not $src) {
-                if ($state -ne 'Detached') { Write-SrunLog 'gateway unreachable - waiting (off campus or no link)'; $state = 'Detached' }
+                if ($state -ne 'Detached') { Write-SrunStateLog 'Detached' 'gateway unreachable - waiting (off campus or no link)'; $state = 'Detached' }
                 Start-Sleep -Seconds $S.DetachedDelay
                 continue
             }
 
             # 2) Only manage WIRED access; if the outlet is wireless, stay out of the way.
             if (@(Get-SrunWiredIpv4) -notcontains $src) {
-                if ($state -ne 'Idle') { Write-SrunLog "outlet $src is not wired (likely Wi-Fi) - leaving it alone"; $state = 'Idle' }
+                if ($state -ne 'Idle') { Write-SrunStateLog 'Idle' "outlet $src is not wired (likely Wi-Fi) - leaving it alone"; $state = 'Idle' }
                 Start-Sleep -Seconds $S.DetachedDelay
                 continue
             }
 
             # 3) Is the internet reachable from the wired outlet?
             if (Test-SrunInternetVia -LocalIp $src -Url $script:SrunProbe.Url -Expect $script:SrunProbe.Expect) {
-                if ($state -ne 'Online') { Write-SrunLog "online via $src"; $state = 'Online' }
-                $fail = 0; $backoff = 0
+                if ($state -ne 'Online') { Write-SrunStateLog 'Online' "online via $src"; $state = 'Online' }
+                $fail = 0; $reconnectFailures = 0; $backoff = 0
                 Start-Sleep -Seconds $S.OnlineInterval
                 continue
             }
@@ -198,16 +187,50 @@ function Start-SrunKeepAlive {
                 continue
             }
 
-            if ($state -ne 'Offline') { Write-SrunLog "offline: $fail consecutive failures on $src - reconnecting"; $state = 'Offline' }
+            # 5) Identity gate. Confirm the peer is the srun gateway before any password material
+            #    is built. A transport error is retried; an identity mismatch is never logged in to.
+            $token = $null
             try {
-                $res = Invoke-SrunLogin -Config $cfg
-                Write-SrunLog "reconnect: $($res.Result) (ip $($res.Ip))"
-                if ($res.Success) { $fail = 0; $backoff = 0; Start-Sleep -Seconds $S.PostLoginDelay; continue }
+                $token = Get-SrunLoginToken -Config $cfg -ExpectedSourceIp $src
             } catch {
-                Write-SrunLog "reconnect failed: $($_.Exception.Message)"
+                Write-SrunLog "gateway probe failed: $($_.Exception.Message)"
+                if ($backoff -eq 0) { $backoff = $S.BackoffStart } else { $backoff = [Math]::Min($S.MaxBackoff, $backoff * $S.BackoffFactor) }
+                Start-Sleep -Seconds $backoff
+                continue
+            }
+            if (-not $token.Ok) {
+                if ($state -ne 'Foreign') { Write-SrunStateLog 'Foreign' "foreign gateway: identity check failed ($($token.Reason)) - not logging in"; $state = 'Foreign' }
+                Start-Sleep -Seconds $S.CooldownDelay
+                continue
             }
 
-            # Reconnect not successful -> exponential backoff.
+            # 6) Identity confirmed. Waking from cooldown starts a fresh attempt budget; the only
+            #    way out of cooldown is a successful identity check on the wired outlet above.
+            if ($state -eq 'Cooling') {
+                Write-SrunStateLog 'Offline' 'gateway identity confirmed again on wired outlet - resuming attempts'
+                $state = 'Offline'
+                $reconnectFailures = 0
+            }
+            if ($state -ne 'Offline') { Write-SrunStateLog 'Offline' "offline: $fail consecutive failures on $src - reconnecting"; $state = 'Offline' }
+
+            try {
+                $res = Send-SrunLogin -Config $cfg -ip $token.Ip -Challenge $token.Challenge
+                Write-SrunLog "reconnect: $($res.Result) (ip $($res.Ip))"
+                if ($res.Success) { $fail = 0; $reconnectFailures = 0; $backoff = 0; Start-Sleep -Seconds $S.PostLoginDelay; continue }
+                $reconnectFailures++
+            } catch {
+                Write-SrunLog "reconnect failed: $($_.Exception.Message)"
+                $reconnectFailures++
+            }
+
+            # 7) Attempt budget exhausted -> cooldown (no more logins until identity is re-verified
+            #    after the delay); otherwise exponential backoff.
+            if ($reconnectFailures -ge $S.MaxReconnectAttempts) {
+                Write-SrunStateLog 'Cooling' "reconnect failed x$reconnectFailures - cooling for $($S.CooldownDelay)s"
+                $state = 'Cooling'
+                Start-Sleep -Seconds $S.CooldownDelay
+                continue
+            }
             if ($backoff -eq 0) { $backoff = $S.BackoffStart } else { $backoff = [Math]::Min($S.MaxBackoff, $backoff * $S.BackoffFactor) }
             Start-Sleep -Seconds $backoff
         } catch {

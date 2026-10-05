@@ -8,6 +8,14 @@ $script:SrunEnvLocate = 'UESTC_LOCATE'   # area override       (optional, see be
 
 $script:SrunLogDir = Join-Path $PSScriptRoot 'logs'
 
+# Daemon state tag: SrunKeepAlive.ps1 writes it on every state-change log line, and Manage.ps1
+# -Action Status parses the newest one back. One definition, two consumers - the pattern below
+# is derived from the tag so the two can never drift. It is anchored to end of line because the
+# tag is always the last thing on a state line: that stops peer-controlled text elsewhere on a
+# line (login result, HTTP error text) from impersonating a state tag.
+$script:SrunStateTag        = '[state={0}]'
+$script:SrunStateTagPattern = [regex]::Escape($script:SrunStateTag).Replace([regex]::Escape('{0}'), '([A-Za-z]+)') + '$'
+
 # Area presets. Url and ac_id belong together; adding a key here is enough - every consumer
 # iterates this table. Ordered so generated lists (menu, hints) stay stable across runs.
 #   Teaching = whole teaching area
