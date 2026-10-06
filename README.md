@@ -32,6 +32,9 @@ Get-ChildItem .\main -Recurse -File | Unblock-File
 powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1
 ```
 
+可以见到如下的窗口：
+![WiredAnchor Management Interface](https://cartesius.site/wp-content/uploads/WiredAnchor_v1.1.0_UI.webp)
+
 然后在菜单里依次完成以下配置：
 
 | 菜单项 | 主要功能 | 说明 |
@@ -40,8 +43,10 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1
 | `5) SetLocate` | 区域选择 | `Teaching`（教学区，默认）或 `Dorm`（宿舍区） |
 | `6) TestLogin` | 单次登录尝试 | 出现 `connected` 即成功 |
 | `7) Install` | 开机自启 | 之后每次登录 Windows 自动运行，无需人工维护 |
+| `9) Enable` | 允许开机自启 | 之后每次登录 Windows 自动运行，无需人工维护 |
+| `11) Start` | 启动 Keep-Alive 守护进程 | 立即启动守护进程，本次登录即可使用 |
 
-**成功标志**：`6) TestLogin` 打印 `ip x.x.x.x` 与 `connected`。
+**成功标志**：`6) TestLogin` 打印 `ip x.x.x.x` 与 `connected`；尝试手动断网后 2 分钟内再次认证成功。
 
 **若未成功**，见 §10；或先运行一次
 `powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Status` 查看状态。
@@ -81,10 +86,13 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1
 ---
 
 <a id="s1"></a>
-## 1. 功能
+## 1. 功能简介
 
 当计算机通过有线网络接入校园网时，**自动完成认证，并在检测到掉线时自动重新认证**。
 
+功能框图
+
+![WiredAnchor Functional Block Diagram](https://cartesius.site/wp-content/uploads/WiredAnchor_v1.1.0_FBD-scaled.webp)
 ---
 
 <a id="s2"></a>
@@ -427,24 +435,7 @@ powershell -ExecutionPolicy Bypass -File .\main\Manage.ps1 -Action Logs -LogLine
 <a id="s9-1"></a>
 ### 9.1 Keep-Alive 状态机
 
-```mermaid
-stateDiagram-v2
-    [*] --> Online
-    Online --> Offline: 外网连续失败 N 次，且网关身份校验通过
-    Online --> Foreign: 身份校验失败（非校园网 / 门户）
-    Online --> Detached: 网关不可达
-    Online --> Idle: 出口不是有线网卡
-    Offline --> Online: 重连成功且外网可达
-    Offline --> Cooling: 连续重连失败达上限
-    Offline --> Detached: 网关也不可达
-    Offline --> Foreign: 身份校验失败
-    Cooling --> Offline: 到期且有线接口身份复核通过
-    Cooling --> Foreign: 身份校验失败
-    Foreign --> Online: 复核通过且外网可达
-    Foreign --> Detached: 网关不可达
-    Detached --> Online: 网关恢复且外网可达
-    Idle --> Online: 出口变回有线
-```
+![WiredAnchor Finite-State Machine](https://cartesius.site/wp-content/uploads/WiredAnchor_v1.1.0_FSM.webp)
 
 | 状态 | 判据 | 行为 |
 |---|---|---|
