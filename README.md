@@ -3,6 +3,8 @@ By Victor Cartesius
 
 > 校园网自动认证，掉线自动重连，免人工登录
 
+> 相关文章链接：https://cartesius.site/projects/uestc_wiredanchor/
+
 | 项目 | 状态 |
 |---|---|
 | 版本号 | **1.1.0** |
